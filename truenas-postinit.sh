@@ -43,6 +43,11 @@ MIDDLEWARE_WAIT=90
 APP_DEPLOY_WAIT=300
 LOG_RETENTION_DAYS=7
 
+# Timeout for midclt calls (seconds). Prevents any single call from blocking.
+MIDCLT_TIMEOUT=15
+# Shorter timeout for the middleware ready check (called in a tight loop).
+MIDCLT_PROBE_TIMEOUT=5
+
 SCRIPT_START=$(date '+%Y-%m-%d %H:%M:%S')
 
 log() {
@@ -93,7 +98,7 @@ start_docker() {
 stop_all_apps() {
     log "Stopping all apps before Docker wipe..."
     local apps
-    apps=$(midclt call app.query 2>/dev/null | python3 -c "
+    apps=$(timeout "$MIDCLT_TIMEOUT" midclt call app.query 2>/dev/null | python3 -c "
 import sys, json
 try:
     for a in json.load(sys.stdin):
@@ -104,7 +109,7 @@ except:
 " 2>/dev/null)
     if [ -n "$apps" ]; then
         for app in $apps; do
-            midclt call app.stop "$app" > /dev/null 2>&1
+            timeout "$MIDCLT_TIMEOUT" midclt call app.stop "$app" > /dev/null 2>&1
         done
         sleep 10
     fi
@@ -127,7 +132,7 @@ full_docker_wipe() {
 restart_middleware() {
     log "Restarting middleware..."
 
-    # Stop middleware
+    # Stop middleware in the background
     systemctl stop middlewared 2>/dev/null &
     local stop_pid=$!
 
@@ -164,7 +169,7 @@ restart_middleware() {
     # Wait for it to become responsive
     log "Waiting for middleware to respond (up to ${MIDDLEWARE_WAIT}s)..."
     for i in $(seq 1 "$MIDDLEWARE_WAIT"); do
-        if midclt call app.query > /dev/null 2>&1; then
+        if timeout "$MIDCLT_PROBE_TIMEOUT" midclt call app.query > /dev/null 2>&1; then
             log "Middleware is ready after ${i}s."
             return 0
         fi
@@ -176,7 +181,7 @@ restart_middleware() {
 }
 
 get_non_running_apps() {
-    midclt call app.query 2>/dev/null | python3 -c "
+    timeout "$MIDCLT_TIMEOUT" midclt call app.query 2>/dev/null | python3 -c "
 import sys, json
 try:
     for a in json.load(sys.stdin):
@@ -188,7 +193,7 @@ except:
 }
 
 get_stopped_apps() {
-    midclt call app.query 2>/dev/null | python3 -c "
+    timeout "$MIDCLT_TIMEOUT" midclt call app.query 2>/dev/null | python3 -c "
 import sys, json
 try:
     for a in json.load(sys.stdin):
@@ -200,7 +205,7 @@ except:
 }
 
 get_all_apps() {
-    midclt call app.query 2>/dev/null | python3 -c "
+    timeout "$MIDCLT_TIMEOUT" midclt call app.query 2>/dev/null | python3 -c "
 import sys, json
 try:
     for a in json.load(sys.stdin):
@@ -211,7 +216,7 @@ except:
 }
 
 log_app_states() {
-    midclt call app.query 2>/dev/null | python3 -c "
+    timeout "$MIDCLT_TIMEOUT" midclt call app.query 2>/dev/null | python3 -c "
 import sys, json
 try:
     for a in json.load(sys.stdin):
@@ -347,14 +352,14 @@ else
         log "Low image count ($image_count). Using redeploy to pull fresh images."
         for app in $stopped; do
             log "Redeploying $app..."
-            midclt call app.redeploy "$app" > /dev/null 2>&1
+            timeout "$MIDCLT_TIMEOUT" midclt call app.redeploy "$app" > /dev/null 2>&1
             sleep 5
         done
     else
         log "Images present ($image_count). Using app.start."
         for app in $stopped; do
             log "Starting $app..."
-            midclt call app.start "$app" > /dev/null 2>&1
+            timeout "$MIDCLT_TIMEOUT" midclt call app.start "$app" > /dev/null 2>&1
             sleep 3
         done
     fi
@@ -388,7 +393,7 @@ for i in $(seq 1 "$APP_DEPLOY_WAIT"); do
                 sleep 10
                 log "Redeploying all apps with fresh images..."
                 for app in $(get_all_apps); do
-                    midclt call app.redeploy "$app" > /dev/null 2>&1
+                    timeout "$MIDCLT_TIMEOUT" midclt call app.redeploy "$app" > /dev/null 2>&1
                     sleep 5
                 done
             else
@@ -403,7 +408,7 @@ for i in $(seq 1 "$APP_DEPLOY_WAIT"); do
         if [ -n "$stuck" ]; then
             log "Redeploying stuck apps at 180s: $(echo $stuck | tr '\n' ' ')"
             for app in $stuck; do
-                midclt call app.redeploy "$app" > /dev/null 2>&1
+                timeout "$MIDCLT_TIMEOUT" midclt call app.redeploy "$app" > /dev/null 2>&1
                 sleep 5
             done
         fi
