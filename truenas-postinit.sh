@@ -4,6 +4,7 @@
 #
 # Phase 0 - Acquires exclusive lock (prevents concurrent runs).
 #           Clears stale lifecycle log. Waits for system to settle.
+# HD Ping - Verifies ZFS pool health. Waits up to 60s for all pools ONLINE.
 # Phase 1 - Waits for network connectivity.
 # Phase 2 - Checks Docker health, repairs with escalating fixes:
 #           Attempt 1: Simple restart with reset-failed.
@@ -38,6 +39,7 @@ LIFECYCLE_LOG="/var/log/app_lifecycle.log"
 DOCKER_DIR="/mnt/.ix-apps/docker"
 MAX_RETRIES=3
 NETWORK_WAIT=60
+HD_PING_WAIT=60
 DOCKER_WAIT=30
 MIDDLEWARE_WAIT=90
 APP_DEPLOY_WAIT=300
@@ -228,6 +230,13 @@ except:
     done
 }
 
+ping_hd() {
+    log "Pool status:"
+    zpool list -H -o name,health 2>/dev/null | while IFS=$'\t' read -r pool health; do
+        log "  $pool: $health"
+    done
+}
+
 check_layer_errors_current_boot() {
     if [ ! -f "$LIFECYCLE_LOG" ]; then
         return 1
@@ -257,6 +266,24 @@ log "========================================="
 # ---- Phase 0: Wait for system to settle ----
 log "Phase 0: Waiting 180s for system and pools to settle..."
 sleep 180
+
+# ---- HD Ping: Verify ZFS pool health ----
+log "HD Ping: Checking ZFS pool health (up to ${HD_PING_WAIT}s)..."
+for i in $(seq 1 "$HD_PING_WAIT"); do
+    pool_count=$(zpool list -H -o name 2>/dev/null | wc -l)
+    if [ "$pool_count" -gt 0 ]; then
+        non_online=$(zpool list -H -o health 2>/dev/null | grep -cv "^ONLINE$")
+        if [ "$non_online" -eq 0 ]; then
+            log "HD Ping: All ${pool_count} ZFS pool(s) ONLINE after ${i}s."
+            break
+        fi
+    fi
+    if [ "$i" -eq "$HD_PING_WAIT" ]; then
+        log "WARNING: ZFS pools not fully ONLINE after ${HD_PING_WAIT}s. Continuing anyway."
+    fi
+    sleep 1
+done
+ping_hd
 
 # ---- Phase 1: Network wait ----
 log "Phase 1: Waiting for network (up to ${NETWORK_WAIT}s)..."
