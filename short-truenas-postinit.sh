@@ -5,6 +5,7 @@
 # Phase 0 - Acquires exclusive lock (prevents concurrent runs).
 #           Clears stale lifecycle log. Waits for system to settle.
 # HD Ping - Verifies ZFS pool health. Waits up to 60s for all pools ONLINE.
+#           Logs disk I/O latency via iostat; warns on read/write > 20ms.
 # Phase 1 - Waits for network connectivity.
 # Phase 2 - Stops Docker, wipes Docker data, restarts Docker clean.
 #           This ensures no corrupted layers carry over between boots.
@@ -36,6 +37,7 @@ LIFECYCLE_LOG="/var/log/app_lifecycle.log"
 DOCKER_DIR="/mnt/.ix-apps/docker"
 NETWORK_WAIT=60
 HD_PING_WAIT=60
+HD_LATENCY_THRESHOLD_MS=20
 DOCKER_WAIT=30
 MIDDLEWARE_WAIT=90
 APP_DEPLOY_WAIT=300
@@ -186,6 +188,37 @@ ping_hd() {
     done
 }
 
+check_disk_latency() {
+    if ! command -v iostat > /dev/null 2>&1; then
+        log "  Disk latency check skipped (iostat not available)."
+        return
+    fi
+    local output header r_col w_col
+    output=$(iostat -dx 1 2 2>/dev/null)
+    header=$(echo "$output" | grep -m1 "r_await")
+    if [ -z "$header" ]; then
+        log "  Disk latency check skipped (iostat format unrecognized)."
+        return
+    fi
+    r_col=$(echo "$header" | tr -s ' ' '\n' | grep -n "^r_await$" | cut -d: -f1)
+    w_col=$(echo "$header" | tr -s ' ' '\n' | grep -n "^w_await$" | cut -d: -f1)
+    if [ -z "$r_col" ] || [ -z "$w_col" ]; then
+        log "  Disk latency check skipped (await columns not found)."
+        return
+    fi
+    log "  Disk I/O latency (threshold: ${HD_LATENCY_THRESHOLD_MS}ms):"
+    echo "$output" | awk -v rc="$r_col" -v wc="$w_col" -v thr="$HD_LATENCY_THRESHOLD_MS" '
+        /^Device/ { block++ }
+        block==2 && /^[a-z]/ {
+            ra = $rc + 0; wa = $wc + 0
+            status = (ra > thr || wa > thr) ? "HIGH" : "OK"
+            printf "    %s: read=%.2fms write=%.2fms [%s]\n", $1, ra, wa, status
+        }
+    ' | while read -r line; do
+        log "$line"
+    done
+}
+
 log_app_states() {
     timeout "$MIDCLT_TIMEOUT" midclt call app.query 2>/dev/null | python3 -c "
 import sys, json
@@ -230,6 +263,7 @@ for i in $(seq 1 "$HD_PING_WAIT"); do
     sleep 1
 done
 ping_hd
+check_disk_latency
 
 # ---- Phase 1: Network wait ----
 log "Phase 1: Waiting for network (up to ${NETWORK_WAIT}s)..."
