@@ -257,17 +257,24 @@ check_disk_latency() {
         log "  Disk latency check skipped (await columns not found)."
         return
     fi
-    log "  Disk I/O latency (threshold: ${HD_LATENCY_THRESHOLD_MS}ms):"
-    echo "$output" | awk -v rc="$r_col" -v wc="$w_col" -v thr="$HD_LATENCY_THRESHOLD_MS" '
+    log "Disk I/O latency (threshold: ${HD_LATENCY_THRESHOLD_MS} ms):"
+    local latency_lines
+    latency_lines=$(echo "$output" | awk -v rc="$r_col" -v wc="$w_col" -v thr="$HD_LATENCY_THRESHOLD_MS" '
         /^Device/ { block++ }
         block==2 && /^[a-z]/ {
             ra = $rc + 0; wa = $wc + 0
-            status = (ra > thr || wa > thr) ? "HIGH" : "OK"
-            printf "    %s: read=%.2fms write=%.2fms [%s]\n", $1, ra, wa, status
+            status = (ra > thr || wa > thr) ? "[HIGH]" : "[OK]  "
+            printf "  %-12s  read=%6.2f ms  write=%6.2f ms  %s\n", $1, ra, wa, status
         }
-    ' | while read -r line; do
+    ')
+    echo "$latency_lines" | while read -r line; do
         log "$line"
     done
+    local high_disks
+    high_disks=$(echo "$latency_lines" | grep '\[HIGH\]' | awk '{print $1}' | paste -sd ' ')
+    if [ -n "$high_disks" ]; then
+        log "WARNING: High disk latency detected on: ${high_disks}"
+    fi
 }
 
 check_layer_errors_current_boot() {
